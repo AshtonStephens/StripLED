@@ -1,9 +1,7 @@
 # StripLED Arduino
 
-## how to run
-
-## Compile
+## running
 
 Into console write
-'sudo make upload monitor clean'
+`sudo make upload monitor clean`
 
