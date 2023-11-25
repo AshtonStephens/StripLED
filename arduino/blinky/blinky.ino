@@ -14,16 +14,16 @@ typedef uint32_t 	uint32;
 
 #define ANAL_HUE	A0
 #define ANAL_SAT	A1
-#define ANAL_VAL	A2
+#define ANAL_VAL 	A2
 #define ANAL_MODE	A3
 #define ANAL_B 		A4
 #define ANAL_C 		A5
 
 #define DATA_PIN    2
-//#define CLK_PIN   4
+#define CLK_PIN   4
 #define LED_TYPE    WS2811
 #define COLOR_ORDER GRB
-#define NUM_LEDS    300
+#define NUM_LEDS    300 // 100
 
 #define BRIGHTNESS         100
 #define FRAMES_PER_SECOND  120
@@ -33,8 +33,8 @@ typedef uint32_t 	uint32;
 #undef abs
 
 template<typename T> void clear(T &t) 		{ memset(&t, 0, sizeof(T)); }
-template<typename T> T min(T a, T b) 		{ return a < b ? a : b; }
-template<typename T> T max(T a, T b) 		{ return a < b ? b : a; }
+template<typename A, typename B> A min(A a, B b) 		{ return a < b ? a : b; }
+template<typename A, typename B> A max(A a, B b) 		{ return a < b ? b : a; }
 template<typename T> T clamp(T t, T a, T b) { return min(max(t, a), b); }
 template<typename T> T abs(T a) 			{ return a < 0 ? -a : a; }
 
@@ -72,10 +72,63 @@ struct ModeChanger {
 };
 
 template<typename T, unsigned N> struct Averaged {
-	T	vals[N];
-	void	update(uint8 i, T v) { vals[i % N] = v; }
-	operator T() const { T t = 0; for (int i = 0; i < N; i++) t += vals[i]; return t / N; }
+	T	val;
+	void	update(T v) { val = (val * (N - 1) + v + N / 2) / N; }
+	operator T() const { return val; }
 };
+
+CHSV rgb_to_hsv(uint8 r, uint8 g, uint8 b) {
+	uint8	v = max(max(r, g), b);
+	uint8	c = v - min(min(r, g), b);
+
+	return	CHSV(
+		c == 0 ? 0 : (
+			v == r ?	int(g) - int(b)
+		:	v == g ?	int(b) - int(r)
+		:				int(r) - int(g)
+		) * 128 / (c * 3) + (v == r ? 0 : v == g ? 1 : 2) * 256 / 3,
+		v == 0 ? 0 : c * 255u / v,
+		v
+	);
+}
+
+CRGB hsv_to_rgb(uint8 h, uint8 s, uint8 v) {
+	uint8	c = (v * s) >> 8;
+	uint8	m = v - c, x = v, y = v;
+	uint16	i = h * 3;
+
+	if (i & 0x80)
+		x -= (c * ( i & 0x7f)) >> 7;
+	else
+		y -= (c * (~i & 0x7f)) >> 7;
+
+	switch (i >> 8) {
+		case 0:	return CRGB(x, y, m);
+		case 1:	return CRGB(m, x, y);
+		case 2:	return CRGB(y, m, x);
+	}
+}
+CHSV to_hsv(const CRGB &x) {
+	return rgb_to_hsv(x.r, x.g, x.b);
+}
+
+CRGB to_rgb(const CHSV &x) {
+	return hsv_to_rgb(x.h, x.s, x.v);
+}
+
+CRGB Tint(CRGB c, CHSV tint) {
+	CHSV	c2 = to_hsv(c);
+	return hsv_to_rgb(c2.h + tint.h, scale8(c2.s, tint.s), scale8(c2.v, tint.v));
+}
+
+CRGB HeatColor2( uint8_t temperature) {
+	uint16	t = temperature * 3;
+	return CRGB(
+		min(t, 255u),
+		t < 256 ? 0 : min(t - 256, 255u),
+		t < 512 ? 0 : min(t - 512, 255u)
+	);
+}
 
 struct Fire {
 	enum {NUM = 300};
@@ -93,31 +146,39 @@ struct Fire {
 		int y = random16(NUM);
 		heat[y] = qadd8( heat[y], random8(160,255) );
 	}
-	void	read(CRGB *leds, uint8 brightness) {
+	void	read(CRGB *leds, CHSV tint) {
     	for (int i = 0; i < NUM; i++)
-		    leds[i] = HeatColor(min(heat[i] * 2, 255)) % brightness;
+		    leds[i] = Tint(HeatColor2(min(heat[i] * 2, 255)), tint);
 	}
 };
 
+template<typename T> HardwareSerial &operator<<(HardwareSerial &serial, const T &t) {
+	serial.print(t);
+	return serial;
+}
+
 struct Blinky {
 	CRGB 		leds[NUM_LEDS];
-	Averaged<uint16,4>	pot[6];
-	uint8		frame;
-	uint8		mode_hold;
+	Averaged<uint16,16>	pot[6];
 	uint32		lastpos;
+	uint8		mode_hold;
 
 	ModeChanger	mode;
 
+	struct Location {
+		uint16	pos:10, hue:6;
+		int16	time;
+	};
+
 	union {
 		struct {
-			struct Location {
-				uint16	pos;
-				int16	time;
-			};
 			int			num_locs;
 			Location	locs[64];
 		};
 		Fire	fire;
+		struct {
+			uint16 counter1, counter2;
+		};
 	};
 
     Blinky() {}
@@ -148,20 +209,42 @@ struct Blinky {
         	pinMode(A0 + i, INPUT);
 
 		clear(leds);
+	#if 0
+		for (int r = 0; r < 256; r += 8)
+		for (int g = 0; g < 256; g += 8)
+		for (int b = 0; b < 256; b += 8) {
+			CHSV	hsv = rgb_to_hsv(r, g, b);
+			CRGB	rgb = to_rgb(hsv);
+			if (abs(r - rgb.r) > 6 || abs(g - rgb.g) > 6 || abs(b - rgb.b) > 6)
+				(Serial
+					<< "(" << r << "," << g << "," << b
+					<< ") to (" << hsv.h << "," << hsv.s << "," << hsv.v << ")"
+					<< ") to (" << rgb.r << "," << rgb.g << "," << rgb.b << ")"
+				).println();
+		}
+	#endif
+		
 	}
     void loop() {
         FastLED.show();  
         FastLED.delay(1000/FRAMES_PER_SECOND);
-
+#if 0
 		for (int i = 0; i < 6; i++)
-			pot[i].update(frame, 1023 - analogRead(A0 + i));
-
+			pot[i].update(1023 - analogRead(A0 + i));
+#else
+		static const uint16 pots0[] = {1023, 1023, 1023, 0x0000, 0x0000, 0x0000};
+		for (int i = 0; i < 6; i++) {
+      if (pots0[i] !=0xffff)
+        pot[i].update(pots0[i]);
+      else
+        pot[i].update(1023 - analogRead(A0 + i));
+		}
+#endif
 		int	n = pot[4];
 		int	m = pot[5];
-		Serial.println(pot[2]>>2);
+		Serial.println(analogRead(A3));
 
-		int		m0 = pot[3] * 8;
-		bool	mb = mode.update(m0);
+		bool	mb = mode.update(analogRead(A3) * 8);
 		if (mb && (mode_hold == 0 || mode_hold > 10))
 			mode_hold = FRAMES_PER_SECOND / 2;
 
@@ -217,10 +300,12 @@ struct Blinky {
 				break;
 			}
 			case 4: {	// sparkles
+			case 5:	// coloured sparkles
 				if (mode_init) {
 					num_locs = 64;
 					for (int i = 0; i < num_locs; i++) {
 						locs[i].pos = random(NUM_LEDS);
+						locs[i].hue = random(64);
 						locs[i].time = random(1024);
 					}
 				}
@@ -228,21 +313,27 @@ struct Blinky {
 				m = max(m - 16, 0);
 				lastpos += m * 8;
 				int		t 	= (lastpos >> 8) + n;
-				CRGB	col = curr_hsv();
+				CHSV	hsv = curr_hsv();
+				CRGB	col = hsv;
 				for (int i = 0; i < num_locs; i++) {
 					int	dt = t - (int)locs[i].time;
 					if (dt <= -1024 || dt >= 256) {
 						if (m) {
 							locs[i].pos = random(NUM_LEDS);
+							locs[i].hue = random(64);
 							locs[i].time = t + random(1024);
 						}
 					} else if (dt > 0) {
-						leds[locs[i].pos] = col % uint8((127 - abs(dt - 128)) * 2);
+						uint8	v = uint8((127 - abs(dt - 128)) * 2);
+						if (mode == 5)
+							leds[locs[i].pos] = CHSV(locs[i].hue * 4, hsv.s, scale8(hsv.v, v));
+						else
+							leds[locs[i].pos] = col % v;
 					}
 				}
 				break;
 			}
-			case 5: {	//single block of leds
+			case 6: {	//single block of leds
 				clear(leds);
 				int		num 	= (m >> 3) + 1;
 				long	pos		= (n * (long)NUM_LEDS) / (1024 / 256);
@@ -263,31 +354,36 @@ struct Blinky {
 				break;
 			}
 
-			case 6: {	//Fire2012
+			case 7: {	//Fire2012
 				if (mode_init)
 					fire.init();
 				fire.update();
-				fire.read(leds, curr_hsv().v);
+				fire.read(leds, curr_hsv());
 				break;
 			}
 
-			case 7: {	// a colored dot sweeping back and forth, with fading trails
+			case 8: {	// a colored dot sweeping back and forth, with fading trails
+				if (mode_init)
+					lastpos = 0;
 				fade(20);
-				int pos = beatsin16(5, 0, NUM_LEDS * 2);
+				counter1 += n;
+				counter2 += m;
+				uint16	beat = sin16(counter1) + 32768;
+				int pos = scale16(beat, NUM_LEDS * 2);
 				if (pos >= NUM_LEDS)
 					pos = NUM_LEDS * 2 - 1 - pos;
 
+				CHSV	col((pot[0] >> 2) + (counter2 >> 8), pot[1] >> 2, max(pot[2] >> 2, 1u));
 				if (lastpos > pos)
-					add_range(pos, lastpos - pos, curr_hsv());
+					add_range(pos, lastpos - pos, col);
 				else
-					add_range(lastpos, pos - lastpos, curr_hsv());
+					add_range(lastpos, pos - lastpos, col);
 
 				lastpos = pos;
 				break;
 			}
 
 		}
-		++frame;
     }
 } blinky;
 
@@ -297,8 +393,6 @@ void setup() {
     blinky.setup();
 }
 void loop() {
+	Serial.println("hello");
     blinky.loop();
 }
-
-
-

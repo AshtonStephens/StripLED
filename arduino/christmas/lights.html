@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script type="text/javascript">
+               
+            const socket = new WebSocket('ws://localhost:1080');
+            console.log(socket);
+
+            // Connection opened
+            socket.addEventListener('open', function (event) {
+                socket.send('Hello Server!');
+            });
+
+            // Listen for messages
+            socket.addEventListener('message', function (event) {
+                console.log('Message from server ', event.data);
+            });
+
+            function preset(p) {
+                console.log("preset" + p);
+                socket.send("preset" + p);
+            }
+        </script>
+    </head>
+    <body>
+        <h1>Christmas Lights</h1>
+        <ol>
+            <li><input type="button" value="preset 1" onclick="preset(1);" /></li>
+            <li><input type="button" value="preset 2" onclick="preset(2);" /></li>
+            <li><input type="button" value="preset 3" onclick="preset(3);" /></li>
+            <li><input type="button" value="preset 4" onclick="preset(4);" /></li>
+            <li><input type="button" value="preset 5" onclick="preset(5);" /></li>
+        </ol>
+    </body>
+
+</html>
